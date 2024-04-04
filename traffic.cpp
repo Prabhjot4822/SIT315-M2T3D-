@@ -1,167 +1,124 @@
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
-#include <thread>
 #include <mutex>
 #include <queue>
-#include <vector>
-#include <chrono>
-#include <ctime>
-#include <algorithm>
-#include <stdexcept>
-#include <fstream>
 #include <sstream>
-#include <iomanip>
-#include <condition_variable>
+#include <string>
+#include <thread>
+#include <vector>
 
-// Define the structure for traffic signal data
-struct TrafficData {
-    std::time_t timestamp; // Timestamp of when the data was recorded
-    int trafficLightId; // Identifier for the traffic light
-    int numCarsPassed; // Number of cars passed the traffic light
+namespace fs = std::filesystem;
 
-    // Constructor with default values
-    TrafficData(std::time_t t = 0, int id = 0, int numCars = 0)
-        : timestamp(t), trafficLightId(id), numCarsPassed(numCars) {}
+struct TrafficRecord {
+    std::string time;
+    std::string light_id;
+    int car_count;
 };
 
-// Comparator for priority queue to sort TrafficData based on numCarsPassed
-struct TrafficDataComparator {
-    bool operator()(const TrafficData& a, const TrafficData& b) {
-        return a.numCarsPassed < b.numCarsPassed;
-    }
-};
-
-// Bounded buffer class for thread-safe access
-template<typename T>
-class BoundedBuffer
-{
+class TrafficBuffer {
 private:
-    std::queue<T> buffer; // Queue to store data
-    const size_t capacity; // Maximum capacity of the buffer
-    std::mutex mtx; // Mutex for thread safety
-    std::condition_variable cv; // Condition variable for synchronization
+    const int capacity;
+    std::mutex mtx;
+    std::condition_variable not_empty;
+    std::condition_variable not_full;
 
 public:
-    BoundedBuffer(size_t cap) : capacity(cap) {}
+    std::queue<TrafficRecord> data_buffer;
 
-    // Add an item to the buffer
-    void add(const T& item)
-    {
-        std::unique_lock<std::mutex> lock(mtx);
-        cv.wait(lock, [this]() { return buffer.size() < capacity; });
-        buffer.push(item);
-        cv.notify_all();
-    }
+    explicit TrafficBuffer(int capacity) : capacity(capacity) {}
 
-    // Remove an item from the buffer
-    T remove()
-    {
-        std::unique_lock<std::mutex> lock(mtx);
-        cv.wait(lock, [this]() { return !buffer.empty(); });
-        T item = buffer.front();
-        buffer.pop();
-        cv.notify_all();
-        return item;
-    }
-
-    // Check if the buffer is empty
-    bool isEmpty()
-    {
-        std::unique_lock<std::mutex> lock(mtx);
-        return buffer.empty();
-    }
+    void add(const TrafficRecord &record);
+    TrafficRecord remove();
 };
 
-// Producer function to read traffic data from file and add to the bounded buffer
-void producer(BoundedBuffer<TrafficData>& buffer, const std::string& filename) {
-    try {
-        std::ifstream file(filename);
-        std::string line;
-        while (std::getline(file, line)) {
-            std::istringstream iss(line);
-            std::string timestampStr, trafficLightIdStr, numCarsPassedStr;
-            if (!(iss >> timestampStr >> trafficLightIdStr >> numCarsPassedStr)) { 
-                continue; 
-            }
+void trafficProducer(const std::string &filename, TrafficBuffer &buffer);
+void trafficConsumer(TrafficBuffer &buffer);
 
-            // Parse timestamp string into a std::time_t object
-            std::tm tm = {};
-            std::istringstream timestampStream(timestampStr);
-            timestampStream >> std::get_time(&tm, "%H:%M:%S");
-            std::time_t timestamp = std::mktime(&tm);
+void TrafficBuffer::add(const TrafficRecord &record) {
+    std::unique_lock<std::mutex> lock(mtx);
+    not_full.wait(lock, [this]() { return static_cast<int>(data_buffer.size()) < capacity; });
+    data_buffer.push(record);
+    not_empty.notify_one();
+}
 
-            int trafficLightId = std::stoi(trafficLightIdStr);
-            int numCarsPassed = std::stoi(numCarsPassedStr);
-            buffer.add(TrafficData(timestamp, trafficLightId, numCarsPassed));
-            std::this_thread::sleep_for(std::chrono::minutes(5)); // Wait for 5 minutes
-        }
-        file.close();
-    } catch (const std::exception& e) {
-        std::cerr << "Exception in producer: " << e.what() << std::endl;
+TrafficRecord TrafficBuffer::remove() {
+    std::unique_lock<std::mutex> lock(mtx);
+    not_empty.wait(lock, [this]() { return !data_buffer.empty(); });
+    TrafficRecord record = data_buffer.front();
+    data_buffer.pop();
+    not_full.notify_one();
+    return record;
+}
+
+void trafficProducer(const std::string &filename, TrafficBuffer &buffer) {
+    std::ifstream input_file(filename);
+    if (!input_file.is_open()) {
+        std::cerr << "Error opening file: " << filename << std::endl;
+        return;
+    }
+
+    std::string line;
+    while (std::getline(input_file, line)) {
+        std::istringstream iss(line);
+        std::string time, light_id;
+        int car_count;
+        iss >> time >> light_id >> car_count;
+        TrafficRecord record{time, light_id, car_count};
+        buffer.add(record);
     }
 }
 
-// Consumer function to process traffic data and maintain top N congested traffic lights
-void consumer(BoundedBuffer<TrafficData>& buffer, int topN) {
-    std::priority_queue<TrafficData, std::vector<TrafficData>, TrafficDataComparator> congestedLights;
+void trafficConsumer(TrafficBuffer &buffer) {
+    std::vector<TrafficRecord> traffic_records;
+    std::string current_hour = "";
     while (true) {
-        try {
-            // Wait for an hour
-            std::this_thread::sleep_for(std::chrono::hours(1));
+        TrafficRecord record = buffer.remove();
+        std::string hour = record.time.substr(0, 2);
 
-            // Process data of the past hour
-            std::vector<TrafficData> hourData;
-            while (!buffer.isEmpty()) {
-                hourData.push_back(buffer.remove());
+        if (hour == "12") break;
+
+        if (hour != current_hour && !traffic_records.empty()) {
+            std::cout << "Time: " << current_hour << ":00\n\n";
+            std::sort(traffic_records.begin(), traffic_records.end(),
+                      [](const TrafficRecord &a, const TrafficRecord &b) { return a.car_count < b.car_count; });
+
+            std::cout << "Max Number Of Cars Crossed Through\n\n";
+            // Using auto for the loop variable
+            for (auto i = traffic_records.size(); i > traffic_records.size() - 3 && i > 0; --i) {
+                const auto &most_congested_light = traffic_records[i - 1];
+                std::cout << "Traffic Light ID: " << most_congested_light.light_id << "\n";
+                std::cout << "Number Of Cars Passed: " << most_congested_light.car_count << "\n\n";
             }
-
-            // Sort the data by numCarsPassed
-            std::sort(hourData.begin(), hourData.end(), [](const TrafficData& a, const TrafficData& b) {
-                return a.numCarsPassed > b.numCarsPassed; // Sort in descending order
-            });
-
-            // Get the top N congested traffic lights
-            for (int i = 0; i < std::min(topN, static_cast<int>(hourData.size())); ++i) {
-                congestedLights.push(hourData[i]);
-            }
-
-            // Print the top N congested traffic lights
-            std::cout << "Top " << topN << " congested traffic lights in the past hour:\n";
-            for (int i = 0; i < topN && !congestedLights.empty(); ++i) {
-                TrafficData data = congestedLights.top();
-                congestedLights.pop();
-                std::cout << "Timestamp: " << std::ctime(&data.timestamp) << "Traffic Light ID: " << data.trafficLightId << ", Cars Passed: " << data.numCarsPassed << std::endl;
-            }
-            std::cout << "------------------------\n";
-        } catch (const std::exception& e) {
-            std::cerr << "Exception in consumer: " << e.what() << std::endl;
+            std::cout << "--------------------------------------\n\n";
+            traffic_records.clear();
         }
+
+        traffic_records.push_back(record);
+        current_hour = hour;
     }
 }
+
 
 int main() {
-    try {
-        const int topN = 3; // Top N congested traffic lights
+    const int buffer_size = 50;
+    TrafficBuffer buffer(buffer_size);
 
-        BoundedBuffer<TrafficData> buffer(100); // Bounded buffer with capacity 100
+    std::thread producer_thread(trafficProducer, "TrafficDataFile.txt", std::ref(buffer));
+    std::thread consumer_thread(trafficConsumer, std::ref(buffer));
 
-        // Create producer thread
-        std::thread producerThread(producer, std::ref(buffer), "TrafficDataFile.txt");
+    auto start_time = std::chrono::high_resolution_clock::now();
 
-        // Create consumer thread
-        std::thread consumerThread(consumer, std::ref(buffer), topN);
+    producer_thread.join();
+    consumer_thread.join();
 
-        // Join producer thread
-        if (producerThread.joinable()) {
-            producerThread.join();
-        }
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
 
-        // Join consumer thread
-        if (consumerThread.joinable()) {
-            consumerThread.join();
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "Exception in main: " << e.what() << std::endl;
-        return 1;
-    }
+    std::cout << "Execution time: " << duration.count() << " microseconds\n";
+
     return 0;
 }
