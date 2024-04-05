@@ -105,7 +105,7 @@ void trafficConsumer(TrafficBuffer &buffer) {
 }
 
 int main() {
-    const int buffer_size = 50;                 // Maximum size of the buffer
+    const int buffer_size = 100;                 // Maximum size of the buffer
     TrafficBuffer buffer(buffer_size);          // Create a traffic buffer
 
     // Create producer and consumer threads
