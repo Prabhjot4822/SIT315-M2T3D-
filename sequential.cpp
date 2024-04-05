@@ -73,9 +73,10 @@ void trafficProducer(const std::string &filename, TrafficBuffer &buffer) {
 void trafficConsumer(TrafficBuffer &buffer) {
     std::vector<TrafficRecord> traffic_records;   // Vector to store traffic records
     std::string current_hour = "";                // Track current hour for analysis
-    while (!buffer.data_buffer.empty()) {
+    while (true) {
         TrafficRecord record = buffer.remove();   // Get a record from the buffer
         std::string hour = record.time.substr(0, 2);
+        if (hour == "12") break;
 
         // If a new hour is reached, analyze the traffic records of the previous hour
         if (hour != current_hour && !traffic_records.empty()) {
@@ -99,7 +100,7 @@ void trafficConsumer(TrafficBuffer &buffer) {
 }
 
 int main() {
-    const int buffer_size = 50;                 // Maximum size of the buffer
+    const int buffer_size = 100;                 // Maximum size of the buffer
     TrafficBuffer buffer(buffer_size);          // Create a traffic buffer
 
     // Simulate traffic data production
