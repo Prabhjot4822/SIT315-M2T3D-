@@ -81,8 +81,6 @@ void trafficConsumer(TrafficBuffer &buffer) {
     while (true) {
         TrafficRecord record = buffer.remove();   // Get a record from the buffer
         std::string hour = record.time.substr(0, 2);
-
-        // Stop processing at midnight
         if (hour == "12") break;
 
         // If a new hour is reached, analyze the traffic records of the previous hour
